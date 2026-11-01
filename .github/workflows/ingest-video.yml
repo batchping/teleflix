@@ -1,0 +1,108 @@
+name: TeleFlix Ingest Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'Direct remote video URL (< 2GB)'
+        required: true
+        type: string
+      video_title:
+        description: 'Video Title'
+        required: false
+        default: 'Untitled Stream'
+        type: string
+      video_id:
+        description: 'Custom Video ID (optional)'
+        required: false
+        type: string
+  repository_dispatch:
+    types: [teleflix_ingest]
+
+concurrency:
+  group: teleflix-global-ingest-queue
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  ingest:
+    name: Remux & Ingest Video
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js (latest LTS)
+        uses: actions/setup-node@v5
+        with:
+          node-version: 'lts/*'
+
+      - name: Cache FFmpeg Binary
+        id: cache-ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: /home/runner/ffmpeg-bin
+          key: ${{ runner.os }}-ffmpeg-v7-static
+
+      - name: Install FFmpeg (if not cached)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /home/runner/ffmpeg-bin
+          curl -sL https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ --strip-components=2 -C /home/runner/ffmpeg-bin --wildcards '*/bin/*'
+          chmod +x /home/runner/ffmpeg-bin/*
+
+      - name: Add FFmpeg to PATH
+        run: echo "/home/runner/ffmpeg-bin" >> $GITHUB_PATH
+
+      - name: Verify FFmpeg
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Cache aria2 Binary
+        id: cache-aria2
+        uses: actions/cache@v5
+        with:
+          path: /home/runner/aria2-bin
+          key: ${{ runner.os }}-aria2-static-v1
+
+      - name: Install aria2 (if not cached)
+        if: steps.cache-aria2.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends aria2
+          mkdir -p /home/runner/aria2-bin
+          cp $(which aria2c) /home/runner/aria2-bin/aria2c
+
+      - name: Add aria2 to PATH
+        run: echo "/home/runner/aria2-bin" >> $GITHUB_PATH
+
+      - name: Verify aria2
+        run: aria2c --version
+
+      - name: Execute Video Ingestion
+        working-directory: ingest
+        env:
+          VIDEO_URL:   ${{ github.event.inputs.video_url   || github.event.client_payload.video_url }}
+          VIDEO_TITLE: ${{ github.event.inputs.video_title || github.event.client_payload.video_title || 'Untitled Stream' }}
+          VIDEO_ID:    ${{ github.event.inputs.video_id    || github.event.client_payload.video_id }}
+          TG_BOT_TOKEN:   ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHANNEL_IDS: ${{ secrets.TG_CHANNEL_IDS }}
+          WORKER_URL:     ${{ secrets.WORKER_URL }}
+          INGEST_SECRET:  ${{ secrets.INGEST_SECRET }}
+        run: node dist/index.js
+
+      - name: Handle Cancellation
+        if: cancelled()
+        run: |
+          echo "Workflow cancelled — marking video as failed..."
+          VIDEO_ID="${{ github.event.inputs.video_id || github.event.client_payload.video_id }}"
+          WORKER_URL="${{ secrets.WORKER_URL }}"
+          INGEST_SECRET="${{ secrets.INGEST_SECRET }}"
+          if [ -n "$VIDEO_ID" ] && [ -n "$WORKER_URL" ]; then
+            curl -s -X POST "${WORKER_URL%/}/api/status" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $INGEST_SECRET" \
+              -d "{\"id\": \"$VIDEO_ID\", \"status\": \"failed\", \"error_message\": \"Job cancelled in GitHub Actions\"}" || true
+          fi

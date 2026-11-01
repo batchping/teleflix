@@ -1,0 +1,20 @@
+name = "teleflix-worker"
+main = "dist/index.js"
+compatibility_date = "2024-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+# Telegram Bot Token & Ingest Secret will be configured in Cloudflare Dashboard or .dev.vars
+# TG_BOT_TOKEN = "your_bot_token_here"
+# INGEST_SECRET = "your_strong_secret_key"
+CORS_ALLOW_ORIGIN = "*"
+
+# D1 Database Binding
+[[d1_databases]]
+binding = "DB"
+database_name = "teleflix_db"
+database_id = "b259f900-34a1-44a1-80ff-59094c9684ac"
