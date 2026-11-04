@@ -1,0 +1,74 @@
+name: Cleanup Old Workflow Runs
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_last:
+        description: 'Number of recent runs to keep per workflow'
+        required: false
+        default: '5'
+        type: string
+  schedule:
+    # Runs every Sunday at midnight UTC
+    - cron: '0 0 * * 0'
+
+jobs:
+  cleanup:
+    name: Delete Old Runs
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Delete Old Workflow Runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const KEEP_LAST = parseInt('${{ github.event.inputs.keep_last || 5 }}', 10);
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            // Get all workflows in this repo
+            const { data: { workflows } } = await github.rest.actions.listRepoWorkflows({ owner, repo });
+            console.log(`Found ${workflows.length} workflow(s).`);
+
+            let totalDeleted = 0;
+
+            for (const workflow of workflows) {
+              console.log(`\nWorkflow: "${workflow.name}" (id: ${workflow.id})`);
+
+              // Fetch all runs for this workflow (newest first)
+              const runs = [];
+              let page = 1;
+              while (true) {
+                const { data } = await github.rest.actions.listWorkflowRuns({
+                  owner, repo,
+                  workflow_id: workflow.id,
+                  per_page: 100,
+                  page,
+                });
+                if (data.workflow_runs.length === 0) break;
+                runs.push(...data.workflow_runs);
+                if (data.workflow_runs.length < 100) break;
+                page++;
+              }
+
+              console.log(`  Total runs: ${runs.length} | Keeping: ${KEEP_LAST}`);
+
+              // Skip the newest KEEP_LAST runs, delete the rest
+              const toDelete = runs.slice(KEEP_LAST);
+              for (const run of toDelete) {
+                try {
+                  await github.rest.actions.deleteWorkflowRun({
+                    owner, repo,
+                    run_id: run.id,
+                  });
+                  totalDeleted++;
+                  console.log(`  Deleted run #${run.run_number} (${run.status} — ${run.created_at})`);
+                } catch (err) {
+                  console.warn(`  Could not delete run #${run.run_number}: ${err.message}`);
+                }
+              }
+            }
+
+            console.log(`\nDone. Deleted ${totalDeleted} run(s) total.`);
