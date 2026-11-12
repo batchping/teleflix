@@ -1,0 +1,122 @@
+name: TeleFlix Ingest Pipeline
+run-name: "Ingest ${{ inputs.video_title }} (${{ inputs.video_id }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'Direct remote video URL (< 2GB)'
+        required: true
+        type: string
+      video_title:
+        description: 'Video Title'
+        required: false
+        default: 'Untitled Stream'
+        type: string
+      video_id:
+        description: 'Custom Video ID (optional)'
+        required: false
+        type: string
+  repository_dispatch:
+    types: [teleflix_ingest]
+
+concurrency:
+  group: teleflix-global-ingest-queue
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  ingest:
+    name: Remux & Ingest Video
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js (latest LTS)
+        uses: actions/setup-node@v5
+        with:
+          node-version: 'lts/*'
+
+      - name: Cache FFmpeg Binary
+        id: cache-ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: /home/runner/ffmpeg-bin
+          key: ${{ runner.os }}-ffmpeg-v7-static
+
+      - name: Install FFmpeg (if not cached)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /home/runner/ffmpeg-bin
+          curl -fSL --retry 3 https://github.com/yt-dlp/FFmpeg-Builds/releases/download/autobuild-2024-10-31-14-11/ffmpeg-N-117671-g513e00cf85-linux64-gpl.tar.xz | tar -xJ --strip-components=2 -C /home/runner/ffmpeg-bin --wildcards '*/bin/*'
+          chmod +x /home/runner/ffmpeg-bin/*
+
+      - name: Add FFmpeg to PATH
+        run: echo "/home/runner/ffmpeg-bin" >> $GITHUB_PATH
+
+      - name: Verify FFmpeg
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Cache aria2 Binary
+        id: cache-aria2
+        uses: actions/cache@v5
+        with:
+          path: /home/runner/aria2-bin
+          key: ${{ runner.os }}-aria2-static-v1
+
+      - name: Install aria2 (if not cached)
+        if: steps.cache-aria2.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends aria2
+          mkdir -p /home/runner/aria2-bin
+          cp $(which aria2c) /home/runner/aria2-bin/aria2c
+
+      - name: Add aria2 to PATH
+        run: echo "/home/runner/aria2-bin" >> $GITHUB_PATH
+
+      - name: Verify aria2
+        run: aria2c --version
+
+      - name: Execute Video Ingestion
+        working-directory: ingest
+        env:
+          VIDEO_URL:   ${{ github.event.inputs.video_url   || github.event.client_payload.video_url }}
+          VIDEO_TITLE: ${{ github.event.inputs.video_title || github.event.client_payload.video_title || 'Untitled Stream' }}
+          VIDEO_ID:    ${{ github.event.inputs.video_id    || github.event.client_payload.video_id }}
+          TG_BOT_TOKENS: ${{ secrets.TG_BOT_TOKENS }}
+          TG_CHANNEL_IDS: ${{ secrets.TG_CHANNEL_IDS }}
+          WORKER_URL:     ${{ secrets.WORKER_URL }}
+          INGEST_SECRET:  ${{ secrets.INGEST_SECRET }}
+          LICENSE_KEY:    ${{ secrets.LICENSE_KEY }}
+        run: |
+          # Sanitize user-provided metadata before the script can log it:
+          # strip control chars (LF/CR, ESC/ANSI, DEL) so a crafted
+          # title/URL/id cannot forge log lines or inject workflow commands
+          # (::error:: / ::stop-commands::) through stdout.
+          export VIDEO_URL="$(printf '%s' "$VIDEO_URL" | tr '\000-\037\177' ' ')"
+          export VIDEO_TITLE="$(printf '%s' "$VIDEO_TITLE" | tr '\000-\037\177' ' ')"
+          export VIDEO_ID="$(printf '%s' "$VIDEO_ID" | tr '\000-\037\177' ' ')"
+          node dist/index.js
+
+      - name: Handle Cancellation
+        if: cancelled()
+        env:
+          VIDEO_ID: ${{ github.event.inputs.video_id || github.event.client_payload.video_id }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: |
+          echo "Workflow cancelled — marking video as failed..."
+          if [ -n "$VIDEO_ID" ] && [ -n "$WORKER_URL" ]; then
+            BODY=$(jq -n --arg id "$VIDEO_ID" '{"id": $id, "status": "failed", "error_message": "Job cancelled in GitHub Actions"}')
+            curl -s -X POST "${WORKER_URL%/}/api/status" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $INGEST_SECRET" \
+              -d "$BODY" || true
+          fi

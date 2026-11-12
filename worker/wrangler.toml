@@ -1,0 +1,32 @@
+name = "teleflix-worker"
+main = "dist/index.js"
+compatibility_date = "2024-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+# Telegram Bot Token, Ingest Secret & License Key configured in Cloudflare Dashboard or .dev.vars
+# LICENSE_KEY = "your_teleflix_license_key"
+# TG_BOT_TOKENS = "your_bot_token_here"  # or "token1,token2,token3" for multiple bots
+# INGEST_SECRET = "your_strong_secret_key"
+# STREAM_SIGNING_SECRET is a secret: set it with `wrangler secret put STREAM_SIGNING_SECRET`
+# (falls back to INGEST_SECRET when unset)
+# STREAM_TOKEN_TTL_SECONDS = "14400"   # 4 hours (60..86400)
+# STREAM_IP_BINDING = "exact"          # exact | subnet | off
+ALLOWED_DOMAINS = "*"
+CORS_ALLOW_ORIGIN = "*"
+
+
+# D1 Database Binding
+[[d1_databases]]
+binding = "DB"
+database_name = "teleflix_db"
+database_id = "b259f900-34a1-44a1-80ff-59094c9684ac"
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = false
